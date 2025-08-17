@@ -20,3 +20,4 @@ pip freeze > requirements.txt
 DB 초기화: python model_sensor.py init  
 더미데이터 insert: python model_sensor.py insert  
 더미데이터 삭제: python model_sensor.py delete# Smartfarm_2025
+# Smartfarm_2025
