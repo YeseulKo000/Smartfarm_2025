@@ -1,0 +1,15 @@
+venv/
+venv_server/
+
+venv_build/
+.venv_build/
+
+wheelhouse/
+
+__pycache__/
+*.pyc
+
+*.jpg
+*.jpeg
+*.png
+*.log
