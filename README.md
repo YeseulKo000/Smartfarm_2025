@@ -15,9 +15,3 @@ pip install -r requirements.txt
 
 // 필요한 패키지 업데이트 (마찬가지로 터미널에서)  
 pip freeze > requirements.txt
-
-// 더미데이터 입력 및 삭제 (터미널에서)  
-DB 초기화: python model_sensor.py init  
-더미데이터 insert: python model_sensor.py insert  
-더미데이터 삭제: python model_sensor.py delete# Smartfarm_2025
-# Smartfarm_2025
