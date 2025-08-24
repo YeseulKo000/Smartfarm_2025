@@ -3,6 +3,7 @@
 # 이후 단계에서 두 버전의 코드를 참고해 각 라우트의 실제 로직을 채워넣습니다.
 
 from flask import Flask, render_template, request, jsonify
+import requests
 import logging
 import threading
 import time
@@ -191,7 +192,6 @@ def receive_sensor():
                 air_humidity=data.get('air_humidity'),
                 light_intensity=data.get('light_intensity'),
                 water_level=data.get('water_level'),
-                strawberry_ripeness_score=data.get('strawberry_ripeness_score'),
             )
         except Exception as e:
             logging.error(f"/sensor 저장 오류: {e}")
@@ -204,37 +204,70 @@ def receive_sensor():
 @app.route('/ai', methods=['POST'])
 def ai_hook():
     """AI 모델과의 통신 엔드포인트.
-    - 케이스 A: 바이너리 이미지 바디로 수신 → 파일 저장(절대경로)
-    - 케이스 B: JSON으로 분석 결과(score/text 등) 수신 → DB 업데이트
-    ==== TODO [AI_PIPELINE] ===================================================
-    - analyze 호출/큐잉, db_manager.update_latest_ripeness(score, text)
-    - 파일명 규칙/메타데이터(DB)에 저장
-    ==========================================================================
+    - A: 바이너리 이미지 수신 → 파일 저장(절대경로) + image_capture 기록
+    - B: JSON 결과 수신 → ai_result 저장 (image_id 또는 file_path 기준 연결)
     """
     content_type = request.headers.get('Content-Type', '')
     try:
+        # B) JSON 결과 수신
         if 'application/json' in content_type:
             payload = request.get_json(silent=True) or {}
-            logging.info(f"/ai JSON 수신: {payload}")
-            if db_manager and hasattr(db_manager, 'update_latest_ripeness'):
-                db_manager.update_latest_ripeness(
-                    payload.get('ripeness_score'),
-                    payload.get('ripeness_text'),
-                )
-            return jsonify({"status": "ok"}), 200
-        else:
-            raw = request.get_data(cache=False)
-            if not raw:
-                return jsonify({"error": "no_image"}), 400
-            filename = f"strawberry_{int(time.time())}.jpg"
-            path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-            # path 자체가 절대경로(UPLOAD_FOLDER 절대화) — 추가 보장
-            path = os.path.abspath(path)
-            with open(path, 'wb') as f:
-                f.write(raw)
-            logging.info(f"/ai 이미지 저장: {path}")
-            # TODO: 분석 호출 및 결과 저장
-            return jsonify({"status": "image_saved", "path": path}), 200
+            # 우선순위: image_id → file_path
+            image_id = payload.get('image_id')
+            file_path = payload.get('file_path')
+
+            if not image_id and file_path and db_manager and hasattr(db_manager, 'find_image_id_by_path'):
+                try:
+                    image_id = db_manager.find_image_id_by_path(file_path)
+                except Exception as e:
+                    logging.error(f"/ai file_path→image_id 조회 오류: {e}")
+                    image_id = None
+
+            if not image_id:
+                return jsonify({"error": "image_id_required"}), 400
+
+            if db_manager and hasattr(db_manager, 'save_ai_result'):
+                try:
+                    ai_id = db_manager.save_ai_result(
+                        image_id=int(image_id),
+                        ripeness_score=payload.get('ripeness_score'),
+                        flower_score=payload.get('flower_score'),
+                        ripeness_text=payload.get('ripeness_text'),
+                        flower_text=payload.get('flower_text'),
+                    )
+                    return jsonify({"status": "ok", "ai_result_id": ai_id}), 200
+                except Exception as e:
+                    logging.error(f"/ai 결과 저장 오류: {e}")
+                    return jsonify({"error": "save_failed"}), 500
+
+            return jsonify({"status": "stub", "note": "db_manager 미연결"}), 200
+
+        # A) 바이너리 이미지 수신
+        raw = request.get_data(cache=False)
+        if not raw:
+            return jsonify({"error": "no_image"}), 400
+
+        filename = f"strawberry_{int(time.time())}.jpg"
+        path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        path = os.path.abspath(path)  # 절대경로 보장
+
+        with open(path, 'wb') as f:
+            f.write(raw)
+        logging.info(f"/ai 이미지 저장: {path}")
+
+        saved_image_id = None
+        if db_manager and hasattr(db_manager, 'save_image_capture'):
+            try:
+                saved_image_id = db_manager.save_image_capture(file_path=path)
+            except Exception as e:
+                logging.error(f"/ai 이미지 DB 기록 오류: {e}")
+
+        return jsonify({
+            "status": "image_saved",
+            "path": path,
+            "image_id": saved_image_id
+        }), 200
+
     except Exception as e:
         logging.error(f"/ai 처리 오류: {e}")
         return jsonify({"error": "ai_hook_failed"}), 500
@@ -244,36 +277,46 @@ def ai_hook():
 # ---------------------------------------------------------------------------
 @app.route('/camera', methods=['POST'])
 def camera_control():
-    """ESP32 카메라 조작 명령 수신(수동 트리거) 및 수신파일 저장.
-    ==== TODO [CAMERA_CONTROL] ===============================================
-    - action 파싱: {"command": "capture" | "status" ...}
-    - 실제 ESP32 호출 로직(HTTP/MQTT)
-    - 비동기 트리거/콜백 설계(/camera/callback 재사용)
-    ==========================================================================
-    """
+    """ESP32 카메라 조작 명령 수신(수동 트리거)."""
     payload = request.get_json(silent=True) or {}
+    command = payload.get("command")
     logging.info(f"/camera 명령: {payload}")
-    return jsonify({"status": "accepted"}), 202
+
+    if command == "capture":
+        try:
+            # ESP32로 촬영 요청 전송 (예: http://<ESP32_IP>/capture)
+            from config import ESP32_IP
+            resp = requests.get(f"http://{ESP32_IP}/capture", timeout=5)
+            return jsonify({"status": "sent", "esp32_response": resp.text}), 200
+        except Exception as e:
+            logging.error(f"/camera ESP32 요청 실패: {e}")
+            return jsonify({"error": "esp32_failed"}), 500
+
+    return jsonify({"status": "unknown_command"}), 400
 
 # 카메라가 서버로 이미지를 푸시하는 콜백(절대경로 저장)
 @app.route('/camera/callback', methods=['POST'])
 def camera_callback():
-    """ESP32에서 촬영 이미지를 서버로 전송할 때 호출하는 콜백.
-    ==== TODO [CAMERA_CALLBACK] ==============================================
-    - 바이너리 저장 + DB 업데이트(촬영시각/디바이스ID 메타 포함)
-    ==========================================================================
-    """
+    """ESP32에서 촬영 이미지를 서버로 전송하는 콜백."""
     raw = request.get_data(cache=False)
     if not raw:
         return jsonify({"error": "no_image"}), 400
+
     filename = f"camera_{int(time.time())}.jpg"
     path = os.path.abspath(os.path.join(app.config['UPLOAD_FOLDER'], filename))
     try:
         with open(path, 'wb') as f:
             f.write(raw)
         logging.info(f"/camera/callback 이미지 저장: {path}")
-        # TODO: DB 반영
-        return jsonify({"status": "saved", "path": path}), 200
+
+        saved_image_id = None
+        if db_manager and hasattr(db_manager, 'save_image_capture'):
+            try:
+                saved_image_id = db_manager.save_image_capture(file_path=path)
+            except Exception as e:
+                logging.error(f"/camera/callback DB 기록 오류: {e}")
+
+        return jsonify({"status": "saved", "path": path, "image_id": saved_image_id}), 200
     except Exception as e:
         logging.error(f"/camera/callback 오류: {e}")
         return jsonify({"error": "save_failed"}), 500
