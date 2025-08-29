@@ -62,9 +62,7 @@
                 <th>공기 온도 (°C)</th>
                 <th>공기 습도 (%)</th>
                 <th>빛 세기</th>
-                <th>물 수위</th>
-                <th>딸기 익은 점수</th>
-                <th>딸기 익은 상태</th>
+                <th>수위 </th>
             </tr>
         </thead>
         <tbody>
@@ -77,8 +75,7 @@
                 <td>{{ row.air_humidity | default('N/A') | round(1) }}</td>
                 <td>{{ row.light_intensity | default('N/A') | round(1) }}</td>
                 <td>{{ row.water_level | default('N/A') | round(1) }}</td>
-                <td>{{ row.strawberry_ripeness_score | default('N/A') | round(2) }}</td>
-                <td>{{ row.strawberry_ripeness_text | default('N/A') }}</td>
+
             </tr>
             {% endfor %}
         </tbody>

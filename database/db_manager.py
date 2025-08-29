@@ -1,17 +1,18 @@
 # database/db_manager.py
 from typing import Any, Dict, List, Optional
 import sqlite3
-from database import init as dbcore  # 연결/경로/스키마 관리는 코어에 위임
+import os
+from database import init as dbcore
 
-# 외부에서 DB 경로를 주입할 때(app.py에서) 사용
+# (기존 set_db_path, get_db_connection, _to_float, 센서 관련 함수들은 동일하므로 생략)
+# ... (이전 코드와 동일한 부분) ...
+
 def set_db_path(path: str) -> None:
     dbcore.set_db_path(path)
 
 def get_db_connection():
-    # 코어의 connect()를 그대로 사용 (foreign_keys ON, row_factory 설정됨)
     return dbcore.connect()
 
-# 숫자 변환 헬퍼
 def _to_float(v):
     if v is None or v == "":
         return None
@@ -54,14 +55,7 @@ def get_all_sensor_data() -> List[Dict[str, Any]]:
     conn = get_db_connection()
     try:
         cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT id, timestamp, soil_moisture, air_temperature, air_humidity,
-                   light_intensity, water_level
-            FROM sensor_data
-            ORDER BY datetime(timestamp) DESC, id DESC
-            """
-        )
+        cur.execute("SELECT * FROM sensor_data ORDER BY datetime(timestamp) DESC, id DESC")
         rows = cur.fetchall()
         return [dict(r) for r in rows]
     except sqlite3.Error as e:
@@ -73,15 +67,7 @@ def get_latest_sensor_data() -> Optional[Dict[str, Any]]:
     conn = get_db_connection()
     try:
         cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT id, timestamp, soil_moisture, air_temperature, air_humidity,
-                   light_intensity, water_level
-            FROM sensor_data
-            ORDER BY datetime(timestamp) DESC, id DESC
-            LIMIT 1
-            """
-        )
+        cur.execute("SELECT * FROM sensor_data ORDER BY datetime(timestamp) DESC, id DESC LIMIT 1")
         row = cur.fetchone()
         return dict(row) if row else None
     except sqlite3.Error as e:
@@ -89,55 +75,62 @@ def get_latest_sensor_data() -> Optional[Dict[str, Any]]:
     finally:
         conn.close()
 
-def get_recent_combined_data(limit: int = 20) -> List[Dict[str, Any]]:
-    try:
-        lim = int(limit)
-    except (TypeError, ValueError):
-        raise ValueError(f"limit must be int-like, got {limit!r}")
-    conn = get_db_connection()
-    try:
-        cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT id, timestamp, soil_moisture, air_temperature, air_humidity,
-                   light_intensity, water_level
-            FROM sensor_data
-            ORDER BY datetime(timestamp) DESC, id DESC
-            LIMIT ?
-            """,
-            (lim,),
-        )
-        rows = cur.fetchall()
-        return [dict(r) for r in rows]
-    except sqlite3.Error as e:
-        raise RuntimeError(f"DB select failed: {e}") from e
-    finally:
-        conn.close()
+# ---------------------------------------------------------------------------
+# ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼ AI 및 이미지 관련 (개선된 부분) ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
+# ---------------------------------------------------------------------------
 
-
-def save_image_capture(file_path: str) -> int:
-    """이미지 저장 기록."""
+def save_image_analysis_result(
+    file_path: str,
+    ripeness_score: Optional[float] = None,
+    flower_count: Optional[int] = None, # score -> count 로 이름 변경
+    ripeness_text: Optional[str] = None,
+    flower_text: Optional[str] = None,
+) -> Dict[str, int]:
+    """
+    (개선된 통합 함수)
+    이미지 경로와 AI 분석 결과를 한 번의 트랜잭션으로 DB에 저장합니다.
+    - image_capture 테이블에 파일 경로 저장
+    - ai_result 테이블에 분석 결과 저장
+    """
     if not file_path:
         raise ValueError("file_path is required")
-    abs_path = file_path  # app.py에서 이미 절대경로로 넘겨줌
+
     conn = get_db_connection()
     try:
         cur = conn.cursor()
+
+        # 1. image_capture 테이블에 이미지 경로 저장
         cur.execute(
             "INSERT INTO image_capture (file_path) VALUES (?)",
-            (abs_path,),
+            (file_path,)
         )
+        image_id = cur.lastrowid # 방금 생성된 이미지 ID 가져오기
+
+        # 2. ai_result 테이블에 위 ID를 사용하여 분석 결과 저장
+        cur.execute(
+            """
+            INSERT INTO ai_result
+            (image_id, ripeness_score, flower_count, ripeness_text, flower_text)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (image_id, ripeness_score, flower_count, ripeness_text, flower_text),
+        )
+        ai_result_id = cur.lastrowid
+
+        # 3. 모든 작업이 성공하면 최종 확정(commit)
         conn.commit()
-        return cur.lastrowid
+
+        return {"image_id": image_id, "ai_result_id": ai_result_id}
+
     except sqlite3.Error as e:
-        raise RuntimeError(f"DB insert image_capture failed: {e}") from e
+        conn.rollback() # 오류 발생 시 모든 작업을 취소
+        raise RuntimeError(f"DB transaction failed for image analysis: {e}") from e
     finally:
         conn.close()
 
 
-def find_image_id_by_path(file_path: str):
+def find_image_id_by_path(file_path: str) -> Optional[int]:
     """절대경로 기준으로 image_capture.id 조회 (없으면 None)."""
-    import os
     abs_path = os.path.abspath(file_path)
     conn = get_db_connection()
     try:
@@ -149,32 +142,46 @@ def find_image_id_by_path(file_path: str):
         raise RuntimeError(f"DB select image_capture failed: {e}") from e
     finally:
         conn.close()
-
-
-def save_ai_result(
-    image_id: int,
-    ripeness_score: Optional[float] = None,
-    flower_score: Optional[float] = None,
-    ripeness_text: Optional[str] = None,
-    flower_text: Optional[str] = None,
-) -> int:
-    """AI 분석 결과 저장 (image_id 필수)."""
-    if not isinstance(image_id, int):
-        raise ValueError("image_id must be int")
+        
+def get_all_analysis_data(limit: int = 30) -> List[Dict[str, Any]]:
+    """
+    이미지 캡처 기록과 AI 분석 결과를 합쳐서 최신순으로 가져옵니다.
+    """
     conn = get_db_connection()
     try:
         cur = conn.cursor()
+        # image_capture 테이블과 ai_result 테이블을 id로 연결(JOIN)합니다.
         cur.execute(
             """
-            INSERT INTO ai_result
-            (image_id, ripeness_score, flower_score, ripeness_text, flower_text)
-            VALUES (?, ?, ?, ?, ?)
+            SELECT
+                ic.id,
+                ic.timestamp,
+                ic.file_path,
+                ar.ripeness_text,
+                ar.ripeness_score,
+                ar.flower_count
+            FROM image_capture ic
+            JOIN ai_result ar ON ic.id = ar.image_id
+            ORDER BY datetime(ic.timestamp) DESC, ic.id DESC
+            LIMIT ?
             """,
-            (image_id, ripeness_score, flower_score, ripeness_text, flower_text),
+            (limit,),
         )
-        conn.commit()
-        return cur.lastrowid
+        rows = cur.fetchall()
+        return [dict(r) for r in rows]
     except sqlite3.Error as e:
-        raise RuntimeError(f"DB insert ai_result failed: {e}") from e
+        raise RuntimeError(f"DB select failed for analysis data: {e}") from e
     finally:
         conn.close()
+
+# ---------------------------------------------------------------------------
+# ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼ 기존 함수 (대체됨) ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
+# ---------------------------------------------------------------------------
+
+# (개선된 'save_image_analysis_result' 함수로 대체되었으므로 주석 처리 또는 삭제 권장)
+# def save_image_capture(file_path: str) -> int:
+#     ...
+
+# (개선된 'save_image_analysis_result' 함수로 대체되었으므로 주석 처리 또는 삭제 권장)
+# def save_ai_result(...) -> int:
+#     ...

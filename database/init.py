@@ -1,10 +1,12 @@
-# database/init.py
+# database/init.py (개선된 버전)
+
 from pathlib import Path
 import sqlite3
 from typing import Optional
 
 DB_PATH: Optional[str] = None
 
+# ... (set_db_path, _resolve_db_path, connect 함수는 이전과 동일) ...
 def set_db_path(path: str) -> None:
     global DB_PATH
     DB_PATH = path
@@ -13,7 +15,7 @@ def _resolve_db_path() -> str:
     if DB_PATH:
         return DB_PATH
     try:
-        from config import DB_PATH as CFG_DB_PATH  # type: ignore
+        from config import DB_PATH as CFG_DB_PATH
         return str(CFG_DB_PATH)
     except Exception:
         return "database.db"
@@ -25,6 +27,7 @@ def connect() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
     return conn
+
 
 def create_tables() -> None:
     sql_sensor = """
@@ -43,16 +46,18 @@ def create_tables() -> None:
     CREATE TABLE IF NOT EXISTS image_capture (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-        file_path TEXT NOT NULL
+        file_path TEXT NOT NULL UNIQUE
     );
     """
-    
+    #                       ▲▲▲▲▲▲ (개선) UNIQUE 제약 조건 추가
+
     sql_ai = """
     CREATE TABLE IF NOT EXISTS ai_result (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         image_id INTEGER NOT NULL,
         ripeness_score REAL,
-        flower_score REAL,
+        flower_count INTEGER,
+    #   ▲▲▲▲▲▲▲▲▲▲▲▲ (개선) score -> count, REAL -> INTEGER 로 변경
         ripeness_text TEXT,
         flower_text TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -73,6 +78,7 @@ def create_tables() -> None:
         conn.commit()
 
 def init_db(drop_all: bool = False) -> None:
+    # ... (이전과 동일) ...
     with connect() as conn:
         cur = conn.cursor()
         if drop_all:
@@ -84,13 +90,18 @@ def init_db(drop_all: bool = False) -> None:
             conn.commit()
     create_tables()
 
-def clean_old_records(retention_days: int = 30) -> int:
+# (개선) 어떤 테이블이든 정리할 수 있도록 함수 일반화
+def clean_old_records(table_name: str, retention_days: int) -> int:
+    """지정된 테이블에서 retention_days보다 오래된 레코드를 삭제합니다."""
+    # 테이블 이름에 허용되지 않는 문자가 있는지 간단히 확인 (SQL Injection 방지)
+    if not table_name.isidentifier():
+        raise ValueError(f"Invalid table name: {table_name}")
+
     with connect() as conn:
         cur = conn.cursor()
-        cur.execute(
-            "DELETE FROM sensor_data WHERE datetime(timestamp) < datetime('now', ?)",
-            (f"-{retention_days} days",),
-        )
+        # f-string을 사용해 동적으로 쿼리 생성
+        query = f"DELETE FROM {table_name} WHERE datetime(timestamp) < datetime('now', ?)"
+        cur.execute(query, (f"-{retention_days} days",))
         deleted = cur.rowcount or 0
         conn.commit()
         return deleted
