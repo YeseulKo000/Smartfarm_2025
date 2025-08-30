@@ -1,11 +1,13 @@
 # ai_module/strawberry_analyzer.py
 
+import os
+from config import BASE_DIR
 from ultralytics import YOLO
 import logging
 
 # --- 1. 두 개의 모델 경로를 각각 지정 ---
-RIPE_MODEL_PATH = 'ai_module/ripe.pt'
-FLOWER_MODEL_PATH = 'ai_module/flower.pt'
+RIPE_MODEL_PATH = RIPE_MODEL_PATH = os.path.join(BASE_DIR, 'ai_module', 'weights', 'ripe.pt')
+FLOWER_MODEL_PATH = os.path.join(BASE_DIR, 'ai_module', 'weights', 'flower.pt')
 
 # --- 2. 두 모델을 각각 로드 ---
 try:
